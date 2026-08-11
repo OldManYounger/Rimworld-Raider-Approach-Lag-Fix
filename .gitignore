@@ -1,0 +1,20 @@
+# Visual Studio workspace and user data
+.vs/
+**/.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Compiler intermediate output
+**/bin/
+**/obj/
+
+# Locally compiled assemblies
+1.6/Assemblies/*.dll
+1.6/Assemblies/*.pdb
+1.6/Assemblies/*.xml
+
+# Logs and temporary profiling output
+*.log
+*.tmp
