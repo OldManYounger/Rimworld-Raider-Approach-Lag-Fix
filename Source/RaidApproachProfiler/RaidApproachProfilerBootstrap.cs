@@ -10,7 +10,7 @@ namespace RaidApproachProfiler
     [StaticConstructorOnStartup]
     public static class RaidApproachProfilerBootstrap
     {
-        private const string HarmonyId = "OldManYoung.RaidApproachProfiler";
+        private const string HarmonyId = "OldManYoung.RaiderApproachLagFix";
 
         /// <summary>
         /// Applies this assembly's Harmony patches and reports successful startup.
@@ -21,8 +21,8 @@ namespace RaidApproachProfiler
             harmony.PatchAll(Assembly.GetExecutingAssembly());
 
             Log.Message(
-                "[Raid Approach Profiler] Loaded successfully. " +
-                "No diagnostic patches are active yet.");
+                "[Raider Approach Lag Fix] Loaded with per-scan steal-value caching " +
+                "and lightweight diagnostics.");
         }
     }
 }

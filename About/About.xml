@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ModMetaData>
-  <packageId>OldManYoung.RaidApproachProfiler</packageId>
+  <packageId>OldManYoung.RaiderApproachLagFix</packageId>
 
-  <name>Raid Approach Profiler</name>
+  <name>Raider Approach Lag Fix</name>
 
   <author>OldManYoung</author>
 
-  <modVersion>0.1.0-dev</modVersion>
+  <modVersion>0.1.0-alpha</modVersion>
 
   <supportedVersions>
     <li>1.6</li>
@@ -25,9 +25,15 @@
   </loadAfter>
 
   <description>
-Development diagnostic mod for investigating periodic MarketValue and Lord-related performance spikes while hostile raiders approach a player colony.
+Reduces periodic stutters that can occur while hostile raiders approach a colony.
 
-This development version does not modify gameplay behavior. It only verifies that the mod assembly and Harmony can load successfully.
+The vanilla high-value-item trigger repeatedly calculates MarketValue for the same nearby trees, stone chunks, and other objects. On heavily modded games, these repeated calculations can produce visible freezes.
+
+This mod temporarily caches each object's calculated value for the duration of one synchronous raider steal scan. The cache is discarded immediately after the scan. It does not change the scan interval, search radius, stealing threshold, or intended target-selection behavior.
+
+This alpha version includes lightweight diagnostic logging.
+
+Requires Harmony.
 
 This is unofficial community-created content and is not endorsed by Ludeon Studios.
   </description>
