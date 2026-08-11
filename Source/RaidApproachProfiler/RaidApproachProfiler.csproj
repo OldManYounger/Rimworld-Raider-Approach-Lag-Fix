@@ -54,8 +54,9 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Properties\AssemblyInfo.cs" />
-    <Compile Include="RaidApproachProfilerBootstrap.cs" />
-    <Compile Include="StealMarketValueTimingPatch.cs" />
+    <Compile Include="RaiderApproachLagFixMod.cs" />
+    <Compile Include="RaiderApproachLagFixSettings.cs" />
+    <Compile Include="StealMarketValueCachePatch.cs" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

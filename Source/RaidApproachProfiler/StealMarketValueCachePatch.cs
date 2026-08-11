@@ -16,38 +16,46 @@ namespace RaidApproachProfiler
     /// Opens a temporary MarketValue cache around
     /// StealAIUtility.TotalMarketValueAround.
     ///
-    /// The cache exists only for the duration of one synchronous steal scan.
-    /// It is cleared after every scan so values are recalculated the next time
-    /// the trigger runs.
+    /// Diagnostic timing is performed only when enabled in mod settings.
     /// </summary>
     [HarmonyPatch(
         typeof(StealAIUtility),
         nameof(StealAIUtility.TotalMarketValueAround))]
-    internal static class StealMarketValueTimingPatch
+    internal static class StealMarketValueScanPatch
     {
         private struct ScanState
         {
             internal bool IsOuterScan;
+            internal bool DiagnosticsEnabled;
             internal long StartedAt;
         }
 
         /// <summary>
-        /// Starts the temporary cache before the steal scan executes.
+        /// Starts the temporary cache and conditionally begins scan timing.
         /// </summary>
         [HarmonyPrefix]
         [HarmonyPriority(Priority.First)]
         private static void Prefix(out ScanState __state)
         {
+            bool diagnosticsEnabled;
+
+            bool isOuterScan =
+                StealMarketValueScanCache.EnterScan(
+                    out diagnosticsEnabled);
+
             __state = new ScanState
             {
-                IsOuterScan = StealMarketValueScanCache.EnterScan(),
-                StartedAt = Stopwatch.GetTimestamp()
+                IsOuterScan = isOuterScan,
+                DiagnosticsEnabled = diagnosticsEnabled,
+                StartedAt = diagnosticsEnabled
+                    ? Stopwatch.GetTimestamp()
+                    : 0
             };
         }
 
         /// <summary>
-        /// Completes timing, records the result, reports accumulated statistics
-        /// when appropriate, and clears the temporary cache.
+        /// Completes the scan, clears its cache, and records diagnostics when
+        /// the corresponding mod option is enabled.
         /// </summary>
         [HarmonyPostfix]
         [HarmonyPriority(Priority.Last)]
@@ -56,17 +64,24 @@ namespace RaidApproachProfiler
             float __result,
             ScanState __state)
         {
-            long elapsedTicks = Stopwatch.GetTimestamp() - __state.StartedAt;
-            bool finishedOuterScan = StealMarketValueScanCache.ExitScan();
+            long elapsedTicks = __state.DiagnosticsEnabled
+                ? Stopwatch.GetTimestamp() - __state.StartedAt
+                : 0;
+
+            bool finishedOuterScan =
+                StealMarketValueScanCache.ExitScan();
 
             if (__state.IsOuterScan && finishedOuterScan)
             {
-                int pawnCount = pawns != null ? pawns.Count : 0;
+                int pawnCount = pawns != null
+                    ? pawns.Count
+                    : 0;
 
                 StealMarketValueScanCache.CompleteScan(
                     elapsedTicks,
                     pawnCount,
-                    __result);
+                    __result,
+                    __state.DiagnosticsEnabled);
             }
         }
 
@@ -91,8 +106,8 @@ namespace RaidApproachProfiler
     // ==================================
 
     /// <summary>
-    /// Reuses the first completed StealAIUtility.GetValue result for each
-    /// individual Thing during the active steal scan.
+    /// Reuses the first completed StealAIUtility.GetValue result for each Thing
+    /// during one TotalMarketValueAround scan.
     /// </summary>
     [HarmonyPatch(
         typeof(StealAIUtility),
@@ -102,15 +117,13 @@ namespace RaidApproachProfiler
         private struct ValueState
         {
             internal bool IsCacheMiss;
+            internal bool MeasureCalculation;
             internal long StartedAt;
         }
 
         /// <summary>
-        /// Returns the cached value when the same Thing has already been
+        /// Returns a cached result when the same Thing has already been
         /// evaluated during the current scan.
-        ///
-        /// Returning false tells Harmony to skip the original GetValue method
-        /// for cache hits.
         /// </summary>
         [HarmonyPrefix]
         [HarmonyPriority(Priority.First)]
@@ -121,37 +134,50 @@ namespace RaidApproachProfiler
         {
             __state = default(ValueState);
 
-            // Preserve completely normal GetValue behavior outside the
-            // TotalMarketValueAround scan.
+            // Preserve normal GetValue behavior outside a steal scan.
             if (!StealMarketValueScanCache.IsActive)
             {
                 return true;
             }
 
-            StealMarketValueScanCache.RecordRequest();
+            bool diagnosticsEnabled =
+                StealMarketValueScanCache.DiagnosticsEnabledForCurrentScan;
+
+            if (diagnosticsEnabled)
+            {
+                StealMarketValueScanCache.RecordRequest();
+            }
 
             float cachedValue;
 
-            if (StealMarketValueScanCache.TryGetValue(thing, out cachedValue))
+            if (StealMarketValueScanCache.TryGetValue(
+                    thing,
+                    out cachedValue))
             {
-                StealMarketValueScanCache.RecordCacheHit();
+                if (diagnosticsEnabled)
+                {
+                    StealMarketValueScanCache.RecordCacheHit();
+                }
+
                 __result = cachedValue;
 
-                // Skip the original GetValue calculation.
+                // Skip the original GetValue calculation for this cache hit.
                 return false;
             }
 
-            // This is the first evaluation of this Thing in the current scan.
+            // The original method must run for the first request.
             __state.IsCacheMiss = true;
-            __state.StartedAt = Stopwatch.GetTimestamp();
+            __state.MeasureCalculation = diagnosticsEnabled;
+            __state.StartedAt = diagnosticsEnabled
+                ? Stopwatch.GetTimestamp()
+                : 0;
 
             return true;
         }
 
         /// <summary>
-        /// Stores the completed result after the first calculation for a Thing.
-        /// It also records the time spent performing actual, uncached
-        /// calculations.
+        /// Stores the first completed result for a Thing and conditionally
+        /// records the calculation time.
         /// </summary>
         [HarmonyPostfix]
         [HarmonyPriority(Priority.Last)]
@@ -160,27 +186,32 @@ namespace RaidApproachProfiler
             float __result,
             ValueState __state)
         {
-            if (!__state.IsCacheMiss || !StealMarketValueScanCache.IsActive)
+            if (!__state.IsCacheMiss ||
+                !StealMarketValueScanCache.IsActive)
             {
                 return;
             }
 
-            long elapsedTicks = Stopwatch.GetTimestamp() - __state.StartedAt;
-
+            // Caching remains active regardless of diagnostic settings.
             StealMarketValueScanCache.StoreValue(thing, __result);
-            StealMarketValueScanCache.RecordCalculation(elapsedTicks);
+
+            if (__state.MeasureCalculation)
+            {
+                long elapsedTicks =
+                    Stopwatch.GetTimestamp() - __state.StartedAt;
+
+                StealMarketValueScanCache.RecordCalculation(
+                    elapsedTicks);
+            }
         }
     }
 
     // ==================================
-    //  CACHE AND DIAGNOSTIC STATE
+    //  CACHE AND OPTIONAL DIAGNOSTICS
     // ==================================
 
     /// <summary>
-    /// Owns the temporary per-scan cache and lightweight aggregate diagnostics.
-    ///
-    /// Thread-static storage prevents cache state from leaking between threads.
-    /// RimWorld normally executes this code on its main game thread.
+    /// Owns the temporary cache and optional diagnostic counters.
     /// </summary>
     internal static class StealMarketValueScanCache
     {
@@ -192,7 +223,10 @@ namespace RaidApproachProfiler
         [ThreadStatic]
         private static int scanDepth;
 
-        // Current-scan diagnostic values.
+        [ThreadStatic]
+        private static bool diagnosticsEnabledForCurrentScan;
+
+        // Current-scan diagnostic counters.
         [ThreadStatic]
         private static long currentRequests;
 
@@ -208,7 +242,7 @@ namespace RaidApproachProfiler
         [ThreadStatic]
         private static long currentMaximumCalculationTicks;
 
-        // Accumulated report values.
+        // Counters accumulated across one reporting window.
         private static long reportScanCount;
         private static long reportPawnCount;
         private static long reportScanTicks;
@@ -223,7 +257,7 @@ namespace RaidApproachProfiler
         private static int lastReportTick = -1;
 
         /// <summary>
-        /// Indicates whether GetValue calls are currently inside a steal scan.
+        /// Indicates whether a steal scan currently owns a temporary cache.
         /// </summary>
         internal static bool IsActive
         {
@@ -234,10 +268,23 @@ namespace RaidApproachProfiler
         }
 
         /// <summary>
-        /// Enters a steal scan and prepares a fresh cache for an outer scan.
-        /// Returns true when this is the outermost scan.
+        /// Indicates whether diagnostics were enabled when the current
+        /// outermost scan began.
         /// </summary>
-        internal static bool EnterScan()
+        internal static bool DiagnosticsEnabledForCurrentScan
+        {
+            get
+            {
+                return diagnosticsEnabledForCurrentScan;
+            }
+        }
+
+        /// <summary>
+        /// Enters a steal scan and prepares a fresh cache for its outermost
+        /// invocation.
+        /// </summary>
+        internal static bool EnterScan(
+            out bool diagnosticsEnabled)
         {
             bool isOuterScan = scanDepth == 0;
 
@@ -253,16 +300,30 @@ namespace RaidApproachProfiler
                     cachedValues.Clear();
                 }
 
+                diagnosticsEnabledForCurrentScan =
+                    RaiderApproachLagFixMod.DiagnosticLoggingEnabled;
+
                 ResetCurrentScanCounters();
+
+                if (!diagnosticsEnabledForCurrentScan)
+                {
+                    // Prevent statistics from an earlier enabled session
+                    // from appearing after diagnostics are re-enabled.
+                    ResetReportCounters();
+                    lastReportTick = -1;
+                }
             }
 
             scanDepth++;
+            diagnosticsEnabled =
+                diagnosticsEnabledForCurrentScan;
 
             return isOuterScan;
         }
 
         /// <summary>
-        /// Leaves a steal scan and returns true once the outermost scan ends.
+        /// Leaves a steal scan and returns true once its outermost invocation
+        /// has ended.
         /// </summary>
         internal static bool ExitScan()
         {
@@ -275,13 +336,17 @@ namespace RaidApproachProfiler
         }
 
         /// <summary>
-        /// Attempts to obtain the previously calculated value for a Thing.
+        /// Attempts to retrieve the previously calculated value for a Thing.
         /// </summary>
-        internal static bool TryGetValue(Thing thing, out float value)
+        internal static bool TryGetValue(
+            Thing thing,
+            out float value)
         {
             if (cachedValues != null && thing != null)
             {
-                return cachedValues.TryGetValue(thing, out value);
+                return cachedValues.TryGetValue(
+                    thing,
+                    out value);
             }
 
             value = 0f;
@@ -289,9 +354,11 @@ namespace RaidApproachProfiler
         }
 
         /// <summary>
-        /// Stores the first completed value for a Thing in the current scan.
+        /// Stores the first completed value for a Thing in this scan.
         /// </summary>
-        internal static void StoreValue(Thing thing, float value)
+        internal static void StoreValue(
+            Thing thing,
+            float value)
         {
             if (cachedValues == null || thing == null)
             {
@@ -302,7 +369,7 @@ namespace RaidApproachProfiler
         }
 
         /// <summary>
-        /// Records one request made to StealAIUtility.GetValue.
+        /// Records one GetValue request.
         /// </summary>
         internal static void RecordRequest()
         {
@@ -310,7 +377,7 @@ namespace RaidApproachProfiler
         }
 
         /// <summary>
-        /// Records a request fulfilled by the temporary cache.
+        /// Records one GetValue request fulfilled by the cache.
         /// </summary>
         internal static void RecordCacheHit()
         {
@@ -318,7 +385,7 @@ namespace RaidApproachProfiler
         }
 
         /// <summary>
-        /// Records one actual GetValue execution and its elapsed time.
+        /// Records one actual GetValue execution.
         /// </summary>
         internal static void RecordCalculation(long elapsedTicks)
         {
@@ -332,39 +399,50 @@ namespace RaidApproachProfiler
         }
 
         /// <summary>
-        /// Adds a completed scan to the reporting window and clears references
-        /// retained by its temporary cache.
+        /// Finishes one scan, clears its temporary references, and records
+        /// optional timing statistics.
         /// </summary>
         internal static void CompleteScan(
             long elapsedTicks,
             int pawnCount,
-            float nearbyValue)
+            float nearbyValue,
+            bool diagnosticsEnabled)
         {
-            reportScanCount++;
-            reportPawnCount += pawnCount;
-            reportScanTicks += elapsedTicks;
-            reportRequests += currentRequests;
-            reportCacheHits += currentCacheHits;
-            reportCalculations += currentCalculations;
-            reportCalculationTicks += currentCalculationTicks;
-            reportLastNearbyValue = nearbyValue;
-
-            if (elapsedTicks > reportMaximumScanTicks)
+            if (diagnosticsEnabled)
             {
-                reportMaximumScanTicks = elapsedTicks;
+                reportScanCount++;
+                reportPawnCount += pawnCount;
+                reportScanTicks += elapsedTicks;
+                reportRequests += currentRequests;
+                reportCacheHits += currentCacheHits;
+                reportCalculations += currentCalculations;
+                reportCalculationTicks += currentCalculationTicks;
+                reportLastNearbyValue = nearbyValue;
+
+                if (elapsedTicks > reportMaximumScanTicks)
+                {
+                    reportMaximumScanTicks = elapsedTicks;
+                }
+
+                if (currentMaximumCalculationTicks >
+                    reportMaximumCalculationTicks)
+                {
+                    reportMaximumCalculationTicks =
+                        currentMaximumCalculationTicks;
+                }
             }
 
-            if (currentMaximumCalculationTicks >
-                reportMaximumCalculationTicks)
-            {
-                reportMaximumCalculationTicks =
-                    currentMaximumCalculationTicks;
-            }
-
-            // Clear Thing references immediately after the scan.
+            // Do not retain map objects after the synchronous scan ends.
             if (cachedValues != null)
             {
                 cachedValues.Clear();
+            }
+
+            diagnosticsEnabledForCurrentScan = false;
+
+            if (!diagnosticsEnabled)
+            {
+                return;
             }
 
             int currentTick = Find.TickManager != null
@@ -384,11 +462,12 @@ namespace RaidApproachProfiler
         }
 
         /// <summary>
-        /// Clears the cache after an exceptional scan termination.
+        /// Clears scan state after an exceptional termination.
         /// </summary>
         internal static void AbortScan()
         {
             scanDepth = 0;
+            diagnosticsEnabledForCurrentScan = false;
             ResetCurrentScanCounters();
 
             if (cachedValues != null)
@@ -398,7 +477,7 @@ namespace RaidApproachProfiler
         }
 
         /// <summary>
-        /// Resets counters that belong to one individual scan.
+        /// Resets counters belonging to one individual scan.
         /// </summary>
         private static void ResetCurrentScanCounters()
         {
@@ -410,7 +489,7 @@ namespace RaidApproachProfiler
         }
 
         /// <summary>
-        /// Writes the lightweight cache report to the RimWorld log.
+        /// Writes one accumulated diagnostic report.
         /// </summary>
         private static void ReportAndReset(int currentTick)
         {
@@ -446,29 +525,37 @@ namespace RaidApproachProfiler
                 TicksToMilliseconds(reportCalculationTicks);
 
             double calculationPercent = reportScanTicks > 0
-                ? (double)reportCalculationTicks / reportScanTicks * 100.0
+                ? (double)reportCalculationTicks /
+                  reportScanTicks * 100.0
                 : 0.0;
 
             double maximumSingleCalculationMilliseconds =
-                TicksToMilliseconds(reportMaximumCalculationTicks);
+                TicksToMilliseconds(
+                    reportMaximumCalculationTicks);
 
             Log.Message(
-                "[Raid Approach Profiler] Cached steal-scan summary:\n" +
+                "[Raider Approach Lag Fix] Cached steal-scan summary:\n" +
                 "calls=" + reportScanCount +
-                ", totalMs=" + totalMilliseconds.ToString("F3") +
-                ", averageMs=" + averageMilliseconds.ToString("F3") +
-                ", maximumMs=" + maximumMilliseconds.ToString("F3") +
+                ", totalMs=" +
+                totalMilliseconds.ToString("F3") +
+                ", averageMs=" +
+                averageMilliseconds.ToString("F3") +
+                ", maximumMs=" +
+                maximumMilliseconds.ToString("F3") +
                 "\n" +
-                "averagePawns=" + averagePawns.ToString("F1") +
+                "averagePawns=" +
+                averagePawns.ToString("F1") +
                 ", getValueRequests=" + reportRequests +
                 ", averageRequestsPerScan=" +
                 averageRequests.ToString("F1") +
                 "\n" +
                 "cacheHits=" + reportCacheHits +
-                ", actualCalculations=" + reportCalculations +
+                ", actualCalculations=" +
+                reportCalculations +
                 ", averageCalculationsPerScan=" +
                 averageCalculations.ToString("F1") +
-                ", cacheHitPercent=" + hitPercent.ToString("F1") +
+                ", cacheHitPercent=" +
+                hitPercent.ToString("F1") +
                 "\n" +
                 "actualCalculationMs=" +
                 calculationMilliseconds.ToString("F3") +
@@ -484,7 +571,7 @@ namespace RaidApproachProfiler
         }
 
         /// <summary>
-        /// Resets the counters accumulated across the reporting window.
+        /// Resets the accumulated reporting window.
         /// </summary>
         private static void ResetReportCounters()
         {
@@ -505,7 +592,8 @@ namespace RaidApproachProfiler
         /// </summary>
         private static double TicksToMilliseconds(long elapsedTicks)
         {
-            return elapsedTicks * 1000.0 / Stopwatch.Frequency;
+            return elapsedTicks * 1000.0 /
+                   Stopwatch.Frequency;
         }
     }
 
@@ -515,11 +603,9 @@ namespace RaidApproachProfiler
 
     /// <summary>
     /// Compares Thing instances by object identity.
-    ///
-    /// This ensures that two separate map objects can never share a cached
-    /// result merely because a type implements value-based equality.
     /// </summary>
-    internal sealed class ReferenceThingComparer : IEqualityComparer<Thing>
+    internal sealed class ReferenceThingComparer :
+        IEqualityComparer<Thing>
     {
         internal static readonly ReferenceThingComparer Instance =
             new ReferenceThingComparer();
@@ -529,7 +615,7 @@ namespace RaidApproachProfiler
         }
 
         /// <summary>
-        /// Returns true only when both values reference the same Thing object.
+        /// Returns true only when both values reference the same Thing.
         /// </summary>
         public bool Equals(Thing x, Thing y)
         {
@@ -537,7 +623,7 @@ namespace RaidApproachProfiler
         }
 
         /// <summary>
-        /// Returns an identity-based hash code for a Thing object.
+        /// Returns an identity-based hash code.
         /// </summary>
         public int GetHashCode(Thing obj)
         {

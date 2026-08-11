@@ -31,7 +31,7 @@ The vanilla high-value-item trigger repeatedly calculates MarketValue for the sa
 
 This mod temporarily caches each object's calculated value for the duration of one synchronous raider steal scan. The cache is discarded immediately after the scan. It does not change the scan interval, search radius, stealing threshold, or intended target-selection behavior.
 
-This alpha version includes lightweight diagnostic logging.
+This alpha version includes optional lightweight diagnostic logging, disabled by default and configurable through the mod settings menu.
 
 Requires Harmony.
 
